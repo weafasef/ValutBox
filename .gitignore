@@ -1,0 +1,12 @@
+# 构建产物
+/out/
+/build/
+/tools/out/
+VaultBox.jar
+VaultBox.app/
+
+# 图标中间产物（可用 tools/IconGen.java 重新生成）
+VaultBox.iconset/
+
+# macOS
+.DS_Store
