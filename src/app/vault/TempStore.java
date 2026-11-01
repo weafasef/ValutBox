@@ -53,6 +53,15 @@ final class TempStore {
         return p != null && Files.isRegularFile(p);
     }
 
+    synchronized void invalidate(String id) {
+        Path p = cache.remove(id);
+        if (p != null) shred(p);
+        try {
+            Files.deleteIfExists(dir.resolve(id));
+        } catch (IOException ignored) {
+        }
+    }
+
     Path dir() {
         return dir;
     }

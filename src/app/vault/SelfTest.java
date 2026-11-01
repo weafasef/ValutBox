@@ -160,12 +160,51 @@ public final class SelfTest {
                 checks++;
             }
 
-            // 重新打开
+            // 重新打开 + 重命名 + 修改密码
+            char[] newPassword = "全新密码456".toCharArray();
             try (Vault reopened = Vault.open(vaultDir, password)) {
                 check(reopened.entries().size() == 1, "重新打开后索引一致");
                 Entry e = reopened.entries().get(0);
                 check(e.path().equals("旅行/视频 片段.mp4"), "文件名一致");
                 check(java.util.Arrays.equals(reopened.readAll(e), data), "重新打开后内容一致");
+
+                // 重命名只改文件名，保留目录
+                Entry renamed = reopened.renameEntry(e, "改名后.mp4");
+                check(renamed.path().equals("旅行/改名后.mp4"), "重命名保留目录路径");
+                check(reopened.entries().get(0).name().equals("改名后.mp4"), "索引文件名已更新");
+
+                // 路径分隔符应拒绝
+                try {
+                    reopened.renameEntry(renamed, "其它目录/文件.mp4");
+                    throw new AssertionError("包含斜杠应失败");
+                } catch (IOException expected) {
+                    checks++;
+                }
+
+                // 错误旧密码修改密码应失败
+                try {
+                    reopened.changePassword("不对的旧密码".toCharArray(), newPassword);
+                    throw new AssertionError("错误旧密码应失败");
+                } catch (Vault.BadPasswordException expected) {
+                    checks++;
+                }
+
+                // 正确修改密码
+                reopened.changePassword(password, newPassword);
+            }
+
+            // 旧密码不再能打开，新密码可以打开且重命名持久化
+            try {
+                Vault.open(vaultDir, password);
+                throw new AssertionError("旧密码本应失效");
+            } catch (Vault.BadPasswordException expected) {
+                checks++;
+            }
+
+            try (Vault withNewPw = Vault.open(vaultDir, newPassword)) {
+                Entry e = withNewPw.entries().get(0);
+                check(e.path().equals("旅行/改名后.mp4"), "新密码打开后重命名已持久化");
+                check(java.util.Arrays.equals(withNewPw.readAll(e), data), "新密码打开后内容一致");
             }
 
             System.out.println("全部自测通过（" + checks + " 项检查）");

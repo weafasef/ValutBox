@@ -8,12 +8,16 @@ import javax.swing.JDialog;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JList;
+import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JPasswordField;
+import javax.swing.JPopupMenu;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTextField;
 import javax.swing.JToolBar;
+import javax.swing.KeyStroke;
 import javax.swing.ListCellRenderer;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
@@ -30,10 +34,15 @@ import java.awt.Desktop;
 import java.awt.Dialog;
 import java.awt.Dimension;
 import java.awt.Font;
+import java.awt.GridBagConstraints;
+import java.awt.GridBagLayout;
 import java.awt.GridLayout;
+import java.awt.Insets;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.Transferable;
 import java.awt.datatransfer.UnsupportedFlavorException;
+import java.awt.event.ActionEvent;
+import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseMotionAdapter;
@@ -78,9 +87,11 @@ final class BrowserPanel extends JPanel {
         bar.add(makeButton("导入文件", this::chooseFiles));
         bar.add(makeButton("导入文件夹", this::chooseFolder));
         bar.addSeparator();
+        bar.add(makeButton("重命名", this::renameSelected));
         bar.add(makeButton("导出", this::exportSelected));
         bar.add(makeButton("删除", this::deleteSelected));
         bar.addSeparator();
+        bar.add(makeButton("修改密码", this::changePassword));
         bar.add(makeButton("播放器设置", this::playerSettings));
         bar.add(makeButton("锁定", app::lockVault));
         bar.add(javax.swing.Box.createHorizontalGlue());
@@ -95,8 +106,26 @@ final class BrowserPanel extends JPanel {
         list.setBorder(BorderFactory.createEmptyBorder(2, 2, 2, 2));
         list.setDragEnabled(true);
         list.setTransferHandler(new DragOutHandler());
-        list.setToolTipText("单击选中，⌘ 点选多个，Shift 连选；可直接拖到聊天窗口");
+        list.setToolTipText("单击选中，⌘ 点选多个，Shift 连选；F2 或右键重命名；可直接拖到聊天窗口");
+        list.getInputMap(JComponent.WHEN_FOCUSED)
+                .put(KeyStroke.getKeyStroke(KeyEvent.VK_F2, 0), "rename");
+        list.getActionMap().put("rename", new javax.swing.AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                renameSelected();
+            }
+        });
         list.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                if (e.isPopupTrigger()) showContextMenu(e);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                if (e.isPopupTrigger()) showContextMenu(e);
+            }
+
             @Override
             public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e)) {
@@ -495,6 +524,166 @@ final class BrowserPanel extends JPanel {
             error("已删除 " + ok + " 个，部分失败：" + firstError);
         } else {
             status.setText("已删除 " + ok + " 个文件 · 共 " + all.size() + " 项");
+        }
+    }
+
+    private void showContextMenu(MouseEvent e) {
+        int idx = list.locationToIndex(e.getPoint());
+        if (idx >= 0 && idx < model.size()) {
+            java.awt.Rectangle bounds = list.getCellBounds(idx, idx);
+            if (bounds != null && bounds.contains(e.getPoint()) && !list.isSelectedIndex(idx)) {
+                list.setSelectedIndex(idx);
+            }
+        }
+        List<Entry> entries = selectedEntries();
+        if (entries.isEmpty()) return;
+
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem openItem = new JMenuItem("打开");
+        openItem.setEnabled(entries.size() == 1);
+        openItem.addActionListener(ev -> open(entries.get(0)));
+        menu.add(openItem);
+
+        JMenuItem renameItem = new JMenuItem("重命名…");
+        renameItem.setEnabled(entries.size() == 1);
+        renameItem.addActionListener(ev -> renameSelected());
+        menu.add(renameItem);
+
+        menu.addSeparator();
+
+        JMenuItem exportItem = new JMenuItem(entries.size() == 1 ? "导出…" : "导出（" + entries.size() + " 项）…");
+        exportItem.addActionListener(ev -> exportSelected());
+        menu.add(exportItem);
+
+        JMenuItem deleteItem = new JMenuItem(entries.size() == 1 ? "删除…" : "删除（" + entries.size() + " 项）…");
+        deleteItem.addActionListener(ev -> deleteSelected());
+        menu.add(deleteItem);
+
+        menu.show(list, e.getX(), e.getY());
+    }
+
+    private void renameSelected() {
+        if (vault == null) return;
+        List<Entry> entries = selectedEntries();
+        if (entries.isEmpty()) {
+            info("先在列表里选择一个文件");
+            return;
+        }
+        if (entries.size() > 1) {
+            info("一次只能重命名一个文件");
+            return;
+        }
+        Entry e = entries.get(0);
+        String oldName = e.name();
+
+        JTextField field = new JTextField(oldName, 28);
+        int dot = oldName.lastIndexOf('.');
+        field.addHierarchyListener(ev -> {
+            if (field.isShowing()) {
+                SwingUtilities.invokeLater(() -> {
+                    field.requestFocusInWindow();
+                    field.select(0, dot > 0 ? dot : oldName.length());
+                });
+            }
+        });
+        String dir = e.dir();
+        JPanel panel = new JPanel(new BorderLayout(0, 6));
+        panel.add(new JLabel(dir.isEmpty() ? "新文件名：" : "所在目录：" + dir + "  ·  新文件名："), BorderLayout.NORTH);
+        panel.add(field, BorderLayout.CENTER);
+
+        int r = JOptionPane.showConfirmDialog(this, panel, "重命名",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (r != JOptionPane.OK_OPTION) return;
+
+        String newName = field.getText().trim();
+        if (newName.isEmpty() || newName.equals(oldName)) return;
+
+        try {
+            Entry updated = vault.renameEntry(e, newName);
+            if (temps != null) temps.invalidate(e.id());
+            reload();
+            list.setSelectedValue(updated, true);
+            status.setText("已重命名为「" + updated.name() + "」");
+        } catch (Exception ex) {
+            error("重命名失败：" + ex.getMessage());
+        }
+    }
+
+    private void changePassword() {
+        if (vault == null) return;
+        JPasswordField oldField = new JPasswordField(22);
+        JPasswordField newField = new JPasswordField(22);
+        JPasswordField confirmField = new JPasswordField(22);
+
+        JPanel panel = new JPanel(new GridBagLayout());
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridx = 0;
+        c.gridy = 0;
+        c.anchor = GridBagConstraints.WEST;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.weightx = 1;
+        c.insets = new Insets(0, 0, 4, 0);
+        panel.add(new JLabel("当前密码"), c);
+        c.gridy = 1;
+        c.insets = new Insets(0, 0, 10, 0);
+        panel.add(oldField, c);
+        c.gridy = 2;
+        c.insets = new Insets(0, 0, 4, 0);
+        panel.add(new JLabel("新密码（至少 6 位）"), c);
+        c.gridy = 3;
+        c.insets = new Insets(0, 0, 10, 0);
+        panel.add(newField, c);
+        c.gridy = 4;
+        c.insets = new Insets(0, 0, 4, 0);
+        panel.add(new JLabel("再输入一次新密码"), c);
+        c.gridy = 5;
+        c.insets = new Insets(0, 0, 8, 0);
+        panel.add(confirmField, c);
+        c.gridy = 6;
+        c.insets = new Insets(0, 0, 0, 0);
+        JLabel warn = new JLabel("密码无法找回，请牢记新密码。");
+        warn.setForeground(new Color(0xc0392b));
+        panel.add(warn, c);
+
+        while (true) {
+            int r = JOptionPane.showConfirmDialog(this, panel, "修改密码",
+                    JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+            if (r != JOptionPane.OK_OPTION) {
+                Crypto.wipe(oldField.getPassword());
+                Crypto.wipe(newField.getPassword());
+                Crypto.wipe(confirmField.getPassword());
+                return;
+            }
+            char[] oldPw = oldField.getPassword();
+            char[] newPw = newField.getPassword();
+            char[] confirmPw = confirmField.getPassword();
+            try {
+                if (oldPw.length == 0) {
+                    JOptionPane.showMessageDialog(this, "请输入当前密码", "提示", JOptionPane.WARNING_MESSAGE);
+                    continue;
+                }
+                if (newPw.length < 6) {
+                    JOptionPane.showMessageDialog(this, "新密码至少 6 位", "密码太短", JOptionPane.WARNING_MESSAGE);
+                    continue;
+                }
+                if (!Arrays.equals(newPw, confirmPw)) {
+                    JOptionPane.showMessageDialog(this, "两次输入的新密码不一致", "密码不一致", JOptionPane.WARNING_MESSAGE);
+                    continue;
+                }
+                vault.changePassword(oldPw, newPw);
+                status.setText("密码已更新，下次解锁请用新密码");
+                info("密码已更新。");
+                return;
+            } catch (Vault.BadPasswordException ex) {
+                JOptionPane.showMessageDialog(this, "当前密码不正确", "验证失败", JOptionPane.ERROR_MESSAGE);
+            } catch (Exception ex) {
+                error("修改密码失败：" + ex.getMessage());
+                return;
+            } finally {
+                Crypto.wipe(oldPw);
+                Crypto.wipe(newPw);
+                Crypto.wipe(confirmPw);
+            }
         }
     }
 

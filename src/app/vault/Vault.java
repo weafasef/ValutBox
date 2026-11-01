@@ -251,6 +251,98 @@ public final class Vault implements AutoCloseable {
         removeEntryInternal(e, true);
     }
 
+    /** 只改文件名，保留所在目录路径；重名则拒绝。 */
+    public Entry renameEntry(Entry entry, String newName) throws IOException {
+        ensureOpen();
+        String name = newName == null ? "" : newName.trim();
+        if (name.isEmpty() || name.equals(".") || name.equals("..")) {
+            throw new IOException("文件名无效");
+        }
+        if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+            throw new IOException("文件名不能包含 / 或 \\");
+        }
+        String dir = entry.dir();
+        String newPath = dir.isEmpty() ? name : dir + "/" + name;
+        if (newPath.equals(entry.path())) return entry;
+
+        Entry updated;
+        synchronized (entries) {
+            Entry existing = findByPath(newPath);
+            if (existing != null && !existing.id().equals(entry.id())) {
+                throw new IOException("同名文件已存在：" + name);
+            }
+            int idx = -1;
+            for (int i = 0; i < entries.size(); i++) {
+                if (entries.get(i).id().equals(entry.id())) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0) throw new IOException("文件条目不存在");
+            updated = new Entry(entry.id(), newPath, entry.size(), entry.mtime(), Entry.kindOf(newPath));
+            entries.set(idx, updated);
+        }
+        saveIndex();
+        return updated;
+    }
+
+    /** 验证旧密码后，用新盐和新 IV 重新包裹主密钥；所有文件密文保持不动。 */
+    public void changePassword(char[] oldPassword, char[] newPassword)
+            throws IOException, BadPasswordException {
+        ensureOpen();
+        if (newPassword == null || newPassword.length < 6) {
+            throw new IOException("新密码至少 6 位");
+        }
+        Path meta = root.resolve(META);
+        Properties p;
+        try (InputStream in = Files.newInputStream(meta)) {
+            p = new Properties();
+            p.load(in);
+        }
+
+        byte[] oldSalt = unb64(p.getProperty("salt"), "salt");
+        byte[] oldIv = unb64(p.getProperty("wrapIv"), "wrapIv");
+        byte[] oldWrapped = unb64(p.getProperty("wrapped"), "wrapped");
+        int iterations;
+        try {
+            iterations = Integer.parseInt(p.getProperty("iterations", String.valueOf(Crypto.ITERATIONS)).trim());
+        } catch (NumberFormatException e) {
+            throw new IOException("加密库参数损坏");
+        }
+
+        byte[] oldKek = Crypto.pbkdf2(oldPassword, oldSalt, iterations);
+        byte[] unwrapped = null;
+        try {
+            unwrapped = Crypto.decrypt(oldKek, oldIv, oldWrapped, 0, oldWrapped.length);
+            if (!Arrays.equals(unwrapped, masterKey)) throw new BadPasswordException();
+        } catch (AEADBadTagException e) {
+            throw new BadPasswordException();
+        } catch (GeneralSecurityException e) {
+            throw new IOException("验证当前密码失败", e);
+        } finally {
+            Crypto.wipe(oldKek);
+            Crypto.wipe(unwrapped);
+        }
+
+        byte[] newSalt = Crypto.random(16);
+        byte[] newIv = Crypto.random(Crypto.NONCE);
+        byte[] newKek = Crypto.pbkdf2(newPassword, newSalt, Crypto.ITERATIONS);
+        byte[] newWrapped;
+        try {
+            newWrapped = Crypto.encrypt(newKek, newIv, masterKey, 0, masterKey.length);
+        } catch (GeneralSecurityException e) {
+            throw new IOException("更新密码失败", e);
+        } finally {
+            Crypto.wipe(newKek);
+        }
+
+        p.setProperty("iterations", String.valueOf(Crypto.ITERATIONS));
+        p.setProperty("salt", b64(newSalt));
+        p.setProperty("wrapIv", b64(newIv));
+        p.setProperty("wrapped", b64(newWrapped));
+        writeProperties(meta, p);
+    }
+
     private void removeEntryInternal(Entry e, boolean save) throws IOException {
         synchronized (entries) {
             entries.removeIf(x -> x.id().equals(e.id()));
