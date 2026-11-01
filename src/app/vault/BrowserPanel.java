@@ -3,6 +3,7 @@ package app.vault;
 import javax.swing.BorderFactory;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JDialog;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
@@ -17,6 +18,7 @@ import javax.swing.ListCellRenderer;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
+import javax.swing.TransferHandler;
 import javax.swing.WindowConstants;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
@@ -29,8 +31,12 @@ import java.awt.Dialog;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.GridLayout;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.datatransfer.Transferable;
+import java.awt.datatransfer.UnsupportedFlavorException;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.event.MouseMotionAdapter;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
@@ -85,19 +91,22 @@ final class BrowserPanel extends JPanel {
 
         list.setCellRenderer(new EntryRenderer());
         list.setFixedCellHeight(76);
-        list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        list.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         list.setBorder(BorderFactory.createEmptyBorder(2, 2, 2, 2));
+        list.setDragEnabled(true);
+        list.setTransferHandler(new DragOutHandler());
+        list.setToolTipText("单击选中，⌘ 点选多个，Shift 连选；可直接拖到聊天窗口");
         list.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e)) {
                     int idx = list.locationToIndex(e.getPoint());
-                    if (idx >= 0 && idx < model.size()) {
-                        list.setSelectedIndex(idx);
-                        open(model.getElementAt(idx));
-                    }
+                    if (idx >= 0 && idx < model.size()) open(model.getElementAt(idx));
                 }
             }
+        });
+        list.addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) renderStatus();
         });
 
         JScrollPane scroll = new JScrollPane(list);
@@ -173,18 +182,30 @@ final class BrowserPanel extends JPanel {
         }
         model.clear();
         for (Entry e : shown) model.addElement(e);
+        renderStatus();
+    }
+
+    private void renderStatus() {
         if (vault == null) {
             status.setText("未解锁");
-        } else if (q.isEmpty()) {
-            status.setText("已解锁 · 共 " + shown.size() + " 项 · 双击打开");
-        } else {
-            status.setText("筛选出 " + shown.size() + " 项（共 " + all.size() + " 项）");
+            return;
         }
+        int selected = list.getSelectedIndices().length;
+        StringBuilder sb = new StringBuilder("已解锁 · 共 ").append(all.size()).append(" 项");
+        if (!search.getText().trim().isEmpty()) {
+            sb.append(" · 筛选出 ").append(model.size()).append(" 项");
+        }
+        if (selected > 0) sb.append(" · 已选 ").append(selected).append(" 项");
+        sb.append(" · 双击打开，可拖到聊天窗口");
+        status.setText(sb.toString());
     }
 
     private Entry selected() {
-        int i = list.getSelectedIndex();
-        return i < 0 || i >= model.size() ? null : model.getElementAt(i);
+        return list.getSelectedValue();
+    }
+
+    private List<Entry> selectedEntries() {
+        return list.getSelectedValuesList();
     }
 
     private List<Entry> visible() {
@@ -377,44 +398,222 @@ final class BrowserPanel extends JPanel {
     // ---------------------------------------------------------------- 导出 / 删除
 
     private void exportSelected() {
-        Entry e = selected();
-        if (e == null) {
-            info("先在列表里选择一个文件");
+        List<Entry> entries = selectedEntries();
+        if (entries.isEmpty()) {
+            info("先在列表里选择文件");
             return;
         }
-        JFileChooser fc = new JFileChooser();
-        fc.setDialogTitle("导出到");
-        fc.setSelectedFile(new File(e.name()));
-        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        Path target = fc.getSelectedFile().toPath();
-        if (Files.exists(target)) {
-            int r = JOptionPane.showConfirmDialog(this, "「" + target.getFileName() + "」已存在，覆盖吗？",
-                    "覆盖确认", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-            if (r != JOptionPane.YES_OPTION) return;
+        if (entries.size() == 1) {
+            Entry e = entries.get(0);
+            JFileChooser fc = new JFileChooser();
+            fc.setDialogTitle("导出到");
+            fc.setSelectedFile(new File(e.name()));
+            if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+            Path target = fc.getSelectedFile().toPath();
+            if (Files.exists(target)) {
+                int r = JOptionPane.showConfirmDialog(this, "「" + target.getFileName() + "」已存在，覆盖吗？",
+                        "覆盖确认", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                if (r != JOptionPane.YES_OPTION) return;
+            }
+            background("正在导出", "正在解密到 " + target.getFileName() + "…",
+                    () -> vault.exportTo(e, target),
+                    () -> status.setText("已导出到 " + target));
+            return;
         }
-        background("正在导出", "正在解密到 " + target.getFileName() + "…",
-                () -> vault.exportTo(e, target),
-                () -> status.setText("已导出到 " + target));
+
+        JFileChooser fc = new JFileChooser();
+        fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        fc.setDialogTitle("导出 " + entries.size() + " 个文件到文件夹");
+        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File chosen = fc.getSelectedFile();
+        if (chosen == null) return;
+        Path dir = chosen.toPath();
+
+        int[] counts = new int[2];
+        String[] firstError = new String[1];
+        background("正在导出", "正在解密 " + entries.size() + " 个文件…", () -> {
+            for (Entry e : entries) {
+                try {
+                    vault.exportTo(e, uniqueTarget(dir, e.name()));
+                    counts[0]++;
+                } catch (Exception ex) {
+                    counts[1]++;
+                    if (firstError[0] == null) firstError[0] = ex.getMessage();
+                }
+            }
+        }, () -> {
+            if (counts[1] > 0) {
+                error("导出完成：成功 " + counts[0] + " 个，失败 " + counts[1] + " 个。\n" + firstError[0]);
+            } else {
+                status.setText("已导出 " + counts[0] + " 个文件到 " + dir);
+            }
+        });
+    }
+
+    private static Path uniqueTarget(Path dir, String name) {
+        String base = name;
+        String ext = "";
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) {
+            base = name.substring(0, dot);
+            ext = name.substring(dot);
+        }
+        Path target = dir.resolve(name);
+        int i = 2;
+        while (Files.exists(target)) {
+            target = dir.resolve(base + " (" + i++ + ")" + ext);
+        }
+        return target;
     }
 
     private void deleteSelected() {
-        Entry e = selected();
-        if (e == null) {
-            info("先在列表里选择一个文件");
+        List<Entry> entries = selectedEntries();
+        if (entries.isEmpty()) {
+            info("先在列表里选择文件");
             return;
         }
-        int r = JOptionPane.showConfirmDialog(this,
-                "删除「" + e.name() + "」？\n加密文件会一起删除，无法恢复。",
+        String message = entries.size() == 1
+                ? "删除「" + entries.get(0).name() + "」？\n加密文件会一起删除，无法恢复。"
+                : "删除选中的 " + entries.size() + " 个文件？\n加密文件会一起删除，无法恢复。";
+        int r = JOptionPane.showConfirmDialog(this, message,
                 "删除", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (r != JOptionPane.YES_OPTION) return;
-        try {
-            vault.deleteEntry(e);
-            thumbs.invalidate(e.id());
-            reload();
-            status.setText("已删除 · 共 " + all.size() + " 项");
-        } catch (Exception ex) {
-            error("删除失败：" + ex.getMessage());
+
+        int ok = 0;
+        String firstError = null;
+        for (Entry e : entries) {
+            try {
+                vault.deleteEntry(e);
+                thumbs.invalidate(e.id());
+                ok++;
+            } catch (Exception ex) {
+                if (firstError == null) firstError = ex.getMessage();
+            }
         }
+        reload();
+        if (firstError != null) {
+            error("已删除 " + ok + " 个，部分失败：" + firstError);
+        } else {
+            status.setText("已删除 " + ok + " 个文件 · 共 " + all.size() + " 项");
+        }
+    }
+
+    // ---------------------------------------------------------------- 拖出到其它应用
+
+    private final class DragOutHandler extends TransferHandler {
+        @Override
+        public int getSourceActions(JComponent c) {
+            return COPY;
+        }
+
+        @Override
+        protected Transferable createTransferable(JComponent c) {
+            if (vault == null || temps == null) return null;
+            List<Entry> entries = selectedEntries();
+            if (entries.isEmpty()) return null;
+            try {
+                List<File> files = prepareDragFiles(entries);
+                return files.isEmpty() ? null : new FileListTransferable(files);
+            } catch (Exception ex) {
+                error("准备拖出失败：" + ex.getMessage());
+                return null;
+            }
+        }
+    }
+
+    private static final class FileListTransferable implements Transferable {
+        private final List<File> files;
+
+        FileListTransferable(List<File> files) {
+            this.files = files;
+        }
+
+        @Override
+        public DataFlavor[] getTransferDataFlavors() {
+            return new DataFlavor[]{DataFlavor.javaFileListFlavor};
+        }
+
+        @Override
+        public boolean isDataFlavorSupported(DataFlavor flavor) {
+            return DataFlavor.javaFileListFlavor.equals(flavor);
+        }
+
+        @Override
+        public Object getTransferData(DataFlavor flavor) throws UnsupportedFlavorException {
+            if (!isDataFlavorSupported(flavor)) throw new UnsupportedFlavorException(flavor);
+            return files;
+        }
+    }
+
+    private List<File> prepareDragFiles(List<Entry> entries) throws Exception {
+        long missing = 0;
+        for (Entry e : entries) {
+            if (!temps.isCached(e)) missing += e.size();
+        }
+        if (missing <= 8L * 1024 * 1024) {
+            setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+            status.setText("正在准备拖出的文件…");
+            try {
+                return decryptToFiles(entries, null);
+            } finally {
+                setCursor(Cursor.getDefaultCursor());
+                renderStatus();
+            }
+        }
+
+        JDialog dialog = new JDialog(app, "正在准备拖出", Dialog.ModalityType.APPLICATION_MODAL);
+        dialog.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
+        JLabel label = new JLabel("正在解密 " + entries.size() + " 个文件…");
+        JProgressBar bar = new JProgressBar();
+        bar.setIndeterminate(true);
+        JPanel panel = new JPanel(new BorderLayout(8, 12));
+        panel.setBorder(BorderFactory.createEmptyBorder(16, 20, 16, 20));
+        panel.add(label, BorderLayout.NORTH);
+        panel.add(bar, BorderLayout.CENTER);
+        dialog.setContentPane(panel);
+        dialog.setSize(440, 130);
+        dialog.setLocationRelativeTo(this);
+
+        AtomicReference<List<File>> result = new AtomicReference<>();
+        AtomicReference<Exception> failure = new AtomicReference<>();
+        SwingWorker<Void, Void> worker = new SwingWorker<>() {
+            @Override
+            protected Void doInBackground() {
+                try {
+                    result.set(decryptToFiles(entries,
+                            msg -> SwingUtilities.invokeLater(() -> label.setText(msg))));
+                } catch (Exception ex) {
+                    failure.set(ex);
+                }
+                return null;
+            }
+
+            @Override
+            protected void done() {
+                dialog.dispose();
+            }
+        };
+        worker.execute();
+        dialog.setVisible(true);
+        renderStatus();
+        if (failure.get() != null) throw failure.get();
+        List<File> files = result.get();
+        if (files == null) throw new IOException("准备拖出失败");
+        return files;
+    }
+
+    private List<File> decryptToFiles(List<Entry> entries,
+                                      java.util.function.Consumer<String> progress) throws Exception {
+        List<File> files = new ArrayList<>(entries.size());
+        int i = 0;
+        for (Entry e : entries) {
+            if (progress != null) {
+                i++;
+                progress.accept("正在解密：" + e.name() + "（" + i + "/" + entries.size() + "）");
+            }
+            files.add(temps.materializeNamed(e, vault).toFile());
+        }
+        return files;
     }
 
     // ---------------------------------------------------------------- 设置 / 工具

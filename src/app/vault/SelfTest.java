@@ -73,6 +73,15 @@ public final class SelfTest {
             vault.exportTo(video, exported);
             check(java.util.Arrays.equals(Files.readAllBytes(exported), data), "导出内容一致");
 
+            // 拖出用的临时文件：保留原名、缓存、锁定清理
+            TempStore tempStore = new TempStore();
+            Path dragged = tempStore.materializeNamed(video, vault);
+            check(dragged.getFileName().toString().equals("视频 片段.mp4"), "拖出文件保留原名");
+            check(java.util.Arrays.equals(Files.readAllBytes(dragged), data), "拖出临时文件内容一致");
+            check(tempStore.materializeNamed(video, vault).equals(dragged), "重复拖出命中缓存");
+            tempStore.clear();
+            check(!Files.exists(dragged), "清理拖出临时文件");
+
             // 随机读取
             long[] offsets = {0, 1, Crypto.CHUNK - 1, Crypto.CHUNK, Crypto.CHUNK + 100,
                     Crypto.CHUNK * 2L, size - 10};
